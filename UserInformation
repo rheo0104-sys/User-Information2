@@ -7,19 +7,12 @@ from datetime import datetime
 import openpyxl
 
 # ==========================================
-# 0. 유틸리티 함수 (공백 및 줄바꿈 제거, 소문자화)
+# 0. 유틸리티 함수 (줄바꿈, 공백 제거 및 소문자화)
 # ==========================================
 def clean_string(s):
     if not s:
         return ""
-    # 모든 공백, 줄바꿈 문자 등을 제거하고 소문자로 통일 (대소문자/줄바꿈 무시 매칭용)
     return re.sub(r'\s+', '', str(s)).lower()
-
-def get_display_header(h):
-    # UI 표출용: 줄바꿈 문자를 띄어쓰기로 치환 (f-string 내부 백슬래시 에러 방지)
-    if not h:
-        return ""
-    return str(h).replace('\n', ' ').strip()
 
 def find_sheet_by_lenient_name(workbook, target_name):
     target_clean = clean_string(target_name)
@@ -71,7 +64,6 @@ class CalendarPopup(tk.Toplevel):
             if int(widget.grid_info()["row"]) > 0:
                 widget.destroy()
                 
-        # f-string 오류를 막기 위해 포맷팅 사용 시 백슬래시 배제
         self.title_label.config(text=f"{self.current_year}년 {self.current_month}월")
         
         import calendar
@@ -114,7 +106,8 @@ class CalendarPopup(tk.Toplevel):
 class IntegratedManagementApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("User Information 통합 관리 시스템 v7.0")
+        self.root.title("User Information 통합 관리 시스템 v6.0")
+        self.root.geometry("1100(너비)x850(높이)") # 실제 코드 적용 시 숫자로 기입
         self.root.geometry("1100x850")
         
         self.target_dir = os.getcwd()
@@ -154,7 +147,7 @@ class IntegratedManagementApp:
         btn = ttk.Button(frame, text="폴더 변경", command=self.browse_folder)
         btn.pack(side=tk.RIGHT, padx=10, pady=5)
         
-        self.file_status_label = tk.Label(self.root, text="파일 스캔 중...", font=("Arial", 10, "bold"), fg="black")
+        self.file_status_label = tk.Label(self.root, text="파일 스캔 중...", font=("Arial", 10, "bold"))
         self.file_status_label.pack(anchor=tk.W, padx=15, pady=2)
 
     def browse_folder(self):
@@ -262,13 +255,11 @@ class IntegratedManagementApp:
         r, c = 0, 0
         for header in self.site_headers:
             h_clean = clean_string(header)
-            # 안전한 변수 가공
-            display_h = get_display_header(header)
-            lbl_text = display_h + ":"
+            lbl_text = header.replace('\n', ' ') + ":"
             
             if "request" in h_clean and "date" in h_clean:
                 ttk.Label(s_fields, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
-                lbl_auto = ttk.Label(s_fields, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), foreground="blue")
+                lbl_auto = ttk.Label(s_fields, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), fg="blue")
                 lbl_auto.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
                 self.site_inputs[header] = ("AUTO_DATE", lbl_auto)
             elif "server" in h_clean and "type" in h_clean:
@@ -305,10 +296,8 @@ class IntegratedManagementApp:
         
         self.site_tree = ttk.Treeview(s_grid_frame, columns=self.site_headers, show="headings", height=8)
         for h in self.site_headers:
-            display_h = get_display_header(h)
-            self.site_tree.heading(h, text=display_h)
+            self.site_tree.heading(h, text=h.replace('\n', ' '))
             self.site_tree.column(h, width=120, anchor=tk.CENTER)
-            
         self.site_tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
         s_scroll = ttk.Scrollbar(s_grid_frame, orient=tk.VERTICAL, command=self.site_tree.yview)
         self.site_tree.configure(yscrollcommand=s_scroll.set)
@@ -317,7 +306,7 @@ class IntegratedManagementApp:
         ttk.Button(site_tab, text="💾 Site 목록 전체 엑셀 파일에 저장하기", command=self.submit_site_data).pack(fill=tk.X, padx=10, pady=5)
 
         # -------------------------------------------------------------
-        # [탭 2: User Information (Active / Inactive 서브 패널로 분리)]
+        # [탭 2: User Information (Active / Inactive 서브 패널로 분리!)]
         # -------------------------------------------------------------
         user_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(user_tab, text="User Information 관리")
@@ -325,23 +314,24 @@ class IntegratedManagementApp:
         user_sub_notebook = ttk.Notebook(user_tab)
         user_sub_notebook.pack(fill=tk.X, padx=5, pady=5)
         
+        # 서브 탭 1: Active용 생성 입력 폼
         sub_active_frame = ttk.Frame(user_sub_notebook)
         user_sub_notebook.add(sub_active_frame, text=" 계정 생성 (Active) ")
         self.build_user_input_form(sub_active_frame, self.user_active_inputs, "Active")
         
+        # 서브 탭 2: Inactive용 만료 입력 폼
         sub_inactive_frame = ttk.Frame(user_sub_notebook)
         user_sub_notebook.add(sub_inactive_frame, text=" 계정 만료 (Inactive) ")
         self.build_user_input_form(sub_inactive_frame, self.user_inactive_inputs, "Inactive")
         
+        # 하나의 공통 Treeview 대기 목록
         u_grid_frame = ttk.LabelFrame(user_tab, text="User 통합 업로드 대기 목록 (Active/Inactive 혼합 관리)")
         u_grid_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
         
         self.user_tree = ttk.Treeview(u_grid_frame, columns=self.user_headers, show="headings", height=10)
         for h in self.user_headers:
-            display_h = get_display_header(h)
-            self.user_tree.heading(h, text=display_h)
+            self.user_tree.heading(h, text=h.replace('\n', ' '))
             self.user_tree.column(h, width=110, anchor=tk.CENTER)
-            
         self.user_tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
         u_scroll = ttk.Scrollbar(u_grid_frame, orient=tk.VERTICAL, command=self.user_tree.yview)
         self.user_tree.configure(yscrollcommand=u_scroll.set)
@@ -380,21 +370,23 @@ class IntegratedManagementApp:
         
         for header in self.user_headers:
             h_clean = clean_string(header)
-            display_h = get_display_header(header)
-            lbl_text = display_h + ":"
+            lbl_text = header.replace('\n', ' ') + ":"
             
+            # 1. 자동 입력 날짜 필드 (Request Date 등)
             if "request" in h_clean and "date" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
-                lbl_auto = ttk.Label(f_box, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), foreground="blue")
+                lbl_auto = ttk.Label(f_box, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), fg="blue")
                 lbl_auto.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
                 input_dict[header] = ("AUTO_DATE", lbl_auto)
                 
+            # 2. 계정 상태 구분 필드 (TYPE 등) -> Active / Inactive 강제 할당 및 락
             elif "type" == h_clean or (len(h_clean) > 2 and "type" in h_clean and not "server" in h_clean):
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
-                lbl_t = ttk.Label(f_box, text=type_mode, font=("Arial", 10, "bold"), foreground="darkgreen" if type_mode=="Active" else "red")
+                lbl_t = ttk.Label(f_box, text=type_mode, font=("Arial", 10, "bold"), fg="darkgreen" if type_mode=="Active" else "red")
                 lbl_t.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
                 input_dict[header] = ("AUTO_TYPE", type_mode)
                 
+            # 3. 서버 타입 선택 콤보박스
             elif "server" in h_clean and "type" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 cb = ttk.Combobox(f_box, values=["beta", "prod"], width=13, state="readonly")
@@ -402,6 +394,7 @@ class IntegratedManagementApp:
                 cb.current(0)
                 input_dict[header] = ("COMBO", cb)
                 
+            # 4. 수동 입력형 날짜 필드 (Activation Date, Expiration Date 등 수동 달력 바인딩)
             elif "date" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 d_frame = ttk.Frame(f_box)
@@ -411,18 +404,21 @@ class IntegratedManagementApp:
                 ttk.Button(d_frame, text="📅", width=3, command=lambda e=ent: CalendarPopup(self.root, e)).pack(side=tk.LEFT, padx=2)
                 input_dict[header] = ("CALENDAR", ent)
                 
+            # 5. SITE_CODE 선택 상자 (Name 상자와 양방향 상호 자동 완성)
             elif "code" in h_clean and "site" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 cb_code = ttk.Combobox(f_box, values=sorted_codes, width=15, state="readonly")
                 cb_code.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
                 input_dict[header] = ("SITE_CODE_CB", cb_code)
                 
+            # 6. SITE_NAME 선택 상자
             elif "name" in h_clean and "site" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 cb_name = ttk.Combobox(f_box, values=sorted_names, width=15, state="readonly")
                 cb_name.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
                 input_dict[header] = ("SITE_NAME_CB", cb_name)
                 
+            # 7. ROLE 다중 체크 셀렉터
             elif "role" in h_clean:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 r_frame = ttk.Frame(f_box)
@@ -437,6 +433,7 @@ class IntegratedManagementApp:
                 btn_role.pack(side=tk.LEFT, padx=2)
                 input_dict[header] = ("ROLE_SELECTOR", selected_roles_list)
                 
+            # 8. 그 외 일반 항목 (User ID, User Name 등 자유 텍스트)
             else:
                 ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
                 ent = ttk.Entry(f_box, width=15)
@@ -447,6 +444,7 @@ class IntegratedManagementApp:
             if c > 2:
                 c = 0; r += 1
                 
+        # 양방향 상호 교차 연동 바인딩 처리
         if cb_code and cb_name:
             cb_code.bind("<<ComboboxSelected>>", lambda event, cc=cb_code, cn=cb_name: self.on_site_code_changed(cc, cn))
             cb_name.bind("<<ComboboxSelected>>", lambda event, cc=cb_code, cn=cb_name: self.on_site_name_changed(cc, cn))
@@ -525,6 +523,7 @@ class IntegratedManagementApp:
             
         self.site_tree.insert("", tk.END, values=row_values)
         
+        # 입력칸 초기화
         for h in self.site_headers:
             if h in self.site_inputs:
                 mode, widget = self.site_inputs[h]
@@ -567,6 +566,7 @@ class IntegratedManagementApp:
             
         self.user_tree.insert("", tk.END, values=row_values)
         
+        # 입력폼 정리 및 비우기
         for h in self.user_headers:
             if h in inputs:
                 info = inputs[h]
@@ -649,15 +649,14 @@ class IntegratedManagementApp:
                         break
                 if id_idx == -1: id_idx = 0
                 
-                # f-string 밖에서 안전하게 변수 생성
                 section_txt = f"★ [{s_name} - 매칭 내역] ★\n"
                 sheet_found = False
                 
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     if id_idx < len(row) and row[id_idx] and clean_string(row[id_idx]) == clean_string(search_key):
                         for h_name, val in zip(headers_raw, row):
-                            # 백슬래시 문법 에러를 회피하기 위해 변수 가공을 f-string 외부로 분리
-                            clean_h_name = get_display_header(h_name)
+                            # 백슬래시 문법 에러 원천 예방 격리구문 수립
+                            clean_h_name = h_name.replace('\n', ' ')
                             display_val = val if val is not None else ''
                             section_txt += f" ▫️ {clean_h_name}: {display_val}\n"
                         section_txt += "--------------------------------------\n"
