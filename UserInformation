@@ -1,0 +1,679 @@
+import os
+import glob
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import datetime
+import openpyxl
+
+# ==========================================
+# 0. 유틸리티 함수 (공백 및 줄바꿈 제거, 소문자화)
+# ==========================================
+def clean_string(s):
+    if not s:
+        return ""
+    # 모든 공백, 줄바꿈 문자 등을 제거하고 소문자로 통일 (대소문자/줄바꿈 무시 매칭용)
+    return re.sub(r'\s+', '', str(s)).lower()
+
+def get_display_header(h):
+    # UI 표출용: 줄바꿈 문자를 띄어쓰기로 치환 (f-string 내부 백슬래시 에러 방지)
+    if not h:
+        return ""
+    return str(h).replace('\n', ' ').strip()
+
+def find_sheet_by_lenient_name(workbook, target_name):
+    target_clean = clean_string(target_name)
+    for sheetname in workbook.sheetnames:
+        if clean_string(sheetname) == target_clean:
+            return workbook[sheetname]
+    return None
+
+# ==========================================
+# 1. 오프라인용 맞춤 내장 달력 팝업 클래스
+# ==========================================
+class CalendarPopup(tk.Toplevel):
+    def __init__(self, parent, target_entry):
+        super().__init__(parent)
+        self.target_entry = target_entry
+        self.title("날짜 선택")
+        self.geometry("280x300")
+        self.resizable(False, False)
+        self.grab_set()  
+        
+        self.now = datetime.now()
+        self.current_year = self.now.year
+        self.current_month = self.now.month
+        
+        self.header_frame = tk.Frame(self)
+        self.header_frame.pack(pady=10)
+        
+        self.prev_btn = ttk.Button(self.header_frame, text="<", width=3, command=self.prev_month)
+        self.prev_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.title_label = tk.Label(self.header_frame, text="", font=("Arial", 12, "bold"))
+        self.title_label.pack(side=tk.LEFT, padx=10)
+        
+        self.next_btn = ttk.Button(self.header_frame, text=">", width=3, command=self.next_month)
+        self.next_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.days_frame = tk.Frame(self)
+        self.days_frame.pack()
+        
+        days = ["일", "월", "화", "수", "목", "금", "토"]
+        for idx, day in enumerate(days):
+            lbl = tk.Label(self.days_frame, text=day, width=4, fg="red" if idx==0 else "blue" if idx==6 else "black")
+            lbl.grid(row=0, column=idx, pady=2)
+            
+        self.draw_calendar()
+        
+    def draw_calendar(self):
+        for widget in self.days_frame.winfo_children():
+            if int(widget.grid_info()["row"]) > 0:
+                widget.destroy()
+                
+        # f-string 오류를 막기 위해 포맷팅 사용 시 백슬래시 배제
+        self.title_label.config(text=f"{self.current_year}년 {self.current_month}월")
+        
+        import calendar
+        cal = calendar.TextCalendar(calendar.SUNDAY)
+        month_days = cal.monthdayscalendar(self.current_year, self.current_month)
+        
+        for r_idx, week in enumerate(month_days):
+            for c_idx, day in enumerate(week):
+                if day == 0:
+                    continue
+                btn = tk.Button(self.days_frame, text=str(day), width=4, height=1,
+                                command=lambda d=day: self.select_date(d))
+                btn.grid(row=r_idx+1, column=c_idx, pady=2, padx=2)
+                if c_idx == 0: btn.config(fg="red")
+                if c_idx == 6: btn.config(fg="blue")
+                
+    def prev_month(self):
+        self.current_month -= 1
+        if self.current_month < 1:
+            self.current_month = 12
+            self.current_year -= 1
+        self.draw_calendar()
+        
+    def next_month(self):
+        self.current_month += 1
+        if self.current_month > 12:
+            self.current_month = 1
+            self.current_year += 1
+        self.draw_calendar()
+        
+    def select_date(self, day):
+        selected_str = f"{self.current_year}-{self.current_month:02d}-{day:02d}"
+        self.target_entry.delete(0, tk.END)
+        self.target_entry.insert(0, selected_str)
+        self.destroy()
+
+# ==========================================
+# 2. 메인 애플리케이션 클래스
+# ==========================================
+class IntegratedManagementApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("User Information 통합 관리 시스템 v7.0")
+        self.root.geometry("1100x850")
+        
+        self.target_dir = os.getcwd()
+        self.latest_src_file = ""
+        
+        # 엑셀 시트 컬럼 정보 헤더 백업 변수
+        self.site_headers = []
+        self.user_headers = []
+        
+        # Site 코드와 Name 연동용 맵
+        self.site_code_name_map = {} 
+        self.site_name_code_map = {} 
+        self.parsed_roles = []
+        
+        # UI 동적 입력 위젯 제어용 딕셔너리
+        self.site_inputs = {}
+        self.user_active_inputs = {}
+        self.user_inactive_inputs = {}
+        
+        # 고정 레이아웃 상단바 빌드
+        self.build_folder_select_ui()
+        
+        # 대형 메인 노트북(탭) 생성
+        self.main_notebook = ttk.Notebook(self.root)
+        self.main_notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+        
+        # 최초 실행 시 파일 스캔 및 연동
+        self.update_latest_file()
+
+    def build_folder_select_ui(self):
+        frame = ttk.LabelFrame(self.root, text="작업 대상 폴더 설정")
+        frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.dir_label = ttk.Label(frame, text=f"현재 폴더: {self.target_dir}", font=("Arial", 9, "italic"))
+        self.dir_label.pack(side=tk.LEFT, padx=10, pady=5, expand=True, fill=tk.X)
+        
+        btn = ttk.Button(frame, text="폴더 변경", command=self.browse_folder)
+        btn.pack(side=tk.RIGHT, padx=10, pady=5)
+        
+        self.file_status_label = tk.Label(self.root, text="파일 스캔 중...", font=("Arial", 10, "bold"), fg="black")
+        self.file_status_label.pack(anchor=tk.W, padx=15, pady=2)
+
+    def browse_folder(self):
+        selected = filedialog.askdirectory(initialdir=self.target_dir)
+        if selected:
+            self.target_dir = selected
+            self.dir_label.config(text=f"현재 폴더: {self.target_dir}")
+            self.update_latest_file()
+
+    def update_latest_file(self):
+        files = glob.glob(os.path.join(self.target_dir, "*.xlsx"))
+        if not files:
+            self.file_status_label.config(text="⚠️ 폴더 내에 엑셀(.xlsx) 파일이 존재하지 않습니다.", fg="red")
+            self.latest_src_file = ""
+            return
+            
+        self.latest_src_file = max(files, key=os.path.getmtime)
+        fname = os.path.basename(self.latest_src_file)
+        self.file_status_label.config(text=f"✅ 연동 파일: {fname}", fg="green")
+        
+        self.load_excel_metadata()
+        self.rebuild_main_ui()
+
+    def load_excel_metadata(self):
+        if not self.latest_src_file: return
+        try:
+            wb = openpyxl.load_workbook(self.latest_src_file, data_only=True)
+            
+            # 1. Site Information 헤더 분석
+            ws_site = find_sheet_by_lenient_name(wb, "Site Information")
+            if ws_site:
+                self.site_headers = [str(cell.value).strip() for cell in ws_site[1] if cell.value]
+            else:
+                self.site_headers = ["User ID", "SITE_NAME", "SITE_CODE", "Server type", "CONTRACT_DATE", "IRB_APPROVAL_DATE", "REQUEST_DATE"]
+            
+            # Site 코드-이름 자동 연동 매핑 생성
+            self.site_code_name_map.clear()
+            self.site_name_code_map.clear()
+            if ws_site:
+                s_headers_clean = [clean_string(h) for h in self.site_headers]
+                idx_code, idx_name = -1, -1
+                for idx, h in enumerate(s_headers_clean):
+                    if "sitecode" in h: idx_code = idx
+                    if "sitename" in h: idx_name = idx
+                
+                if idx_code != -1 and idx_name != -1:
+                    for row in ws_site.iter_rows(min_row=2, values_only=True):
+                        if idx_code < len(row) and idx_name < len(row):
+                            code_val = str(row[idx_code]).strip() if row[idx_code] is not None else ""
+                            name_val = str(row[idx_name]).strip() if row[idx_name] is not None else ""
+                            if code_val and name_val:
+                                self.site_code_name_map[code_val] = name_val
+                                self.site_name_code_map[name_val] = code_val
+
+            # 2. User Information 헤더 분석
+            ws_user = find_sheet_by_lenient_name(wb, "User Information")
+            if ws_user:
+                self.user_headers = [str(cell.value).strip() for cell in ws_user[1] if cell.value]
+            else:
+                self.user_headers = ["User ID", "SITE_NAME", "SITE_CODE", "Server type", "ROLE", "ACTIVATION_DATE", "TYPE", "REQUEST_DATE"]
+            
+            # 엑셀 내부 기존의 Role 데이터 파싱 및 고유 목록 추출
+            self.parsed_roles = []
+            if ws_user and ws_user.max_row >= 2:
+                u_headers_clean = [clean_string(h) for h in self.user_headers]
+                idx_role = -1
+                for idx, h in enumerate(u_headers_clean):
+                    if "role" in h:
+                        idx_role = idx
+                        break
+                if idx_role != -1:
+                    unique_roles = set()
+                    for r_val in ws_user.iter_rows(min_row=2, column=idx_role+1, values_only=True):
+                        if r_val[0]:
+                            tokens = re.split(r'[\s,]+', str(r_val[0]))
+                            for t in tokens:
+                                if t.strip(): unique_roles.add(t.strip())
+                    self.parsed_roles = sorted(list(unique_roles))
+            
+            if not self.parsed_roles:
+                self.parsed_roles = ["Admin", "User", "Manager", "Reviewer", "Data Ingestor", "Lead Coder"]
+                
+            wb.close()
+        except Exception as e:
+            print(f"메타데이터 로드 중 오류 발생: {e}")
+
+    def rebuild_main_ui(self):
+        # 기존 탭 레이아웃 클리어
+        for widget in self.main_notebook.winfo_children():
+            widget.destroy()
+            
+        self.site_inputs.clear()
+        self.user_active_inputs.clear()
+        self.user_inactive_inputs.clear()
+        
+        # -------------------------------------------------------------
+        # [탭 1: Site Information]
+        # -------------------------------------------------------------
+        site_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(site_tab, text="Site Information 관리")
+        
+        s_fields = ttk.LabelFrame(site_tab, text="Site 엑셀 동적 항목 입력")
+        s_fields.pack(fill=tk.X, padx=10, pady=5)
+        
+        r, c = 0, 0
+        for header in self.site_headers:
+            h_clean = clean_string(header)
+            # 안전한 변수 가공
+            display_h = get_display_header(header)
+            lbl_text = display_h + ":"
+            
+            if "request" in h_clean and "date" in h_clean:
+                ttk.Label(s_fields, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                lbl_auto = ttk.Label(s_fields, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), foreground="blue")
+                lbl_auto.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                self.site_inputs[header] = ("AUTO_DATE", lbl_auto)
+            elif "server" in h_clean and "type" in h_clean:
+                ttk.Label(s_fields, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                cb = ttk.Combobox(s_fields, values=["beta", "prod"], width=13, state="readonly")
+                cb.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                cb.current(0)
+                self.site_inputs[header] = ("COMBO", cb)
+            elif ("contract" in h_clean and "date" in h_clean) or "irb" in h_clean or "date" in h_clean:
+                ttk.Label(s_fields, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                d_frame = ttk.Frame(s_fields)
+                d_frame.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                ent = ttk.Entry(d_frame, width=12)
+                ent.pack(side=tk.LEFT)
+                ttk.Button(d_frame, text="📅", width=3, command=lambda e=ent: CalendarPopup(self.root, e)).pack(side=tk.LEFT, padx=2)
+                self.site_inputs[header] = ("CALENDAR", ent)
+            else:
+                ttk.Label(s_fields, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                ent = ttk.Entry(s_fields, width=15)
+                ent.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                self.site_inputs[header] = ("TEXT", ent)
+                
+            c += 1
+            if c > 2:
+                c = 0; r += 1
+                
+        s_btn_frame = ttk.Frame(s_fields)
+        s_btn_frame.grid(row=r+1, column=0, columnspan=6, padx=5, pady=10, sticky=tk.E)
+        ttk.Button(s_btn_frame, text="➕ 목록 추가", command=self.add_site_to_grid).pack(side=tk.LEFT, padx=4)
+        ttk.Button(s_btn_frame, text="❌ 선택 삭제", command=lambda: self.delete_selected_grid(self.site_tree)).pack(side=tk.LEFT, padx=4)
+        
+        s_grid_frame = ttk.LabelFrame(site_tab, text="Site 업로드 대기 목록")
+        s_grid_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+        
+        self.site_tree = ttk.Treeview(s_grid_frame, columns=self.site_headers, show="headings", height=8)
+        for h in self.site_headers:
+            display_h = get_display_header(h)
+            self.site_tree.heading(h, text=display_h)
+            self.site_tree.column(h, width=120, anchor=tk.CENTER)
+            
+        self.site_tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
+        s_scroll = ttk.Scrollbar(s_grid_frame, orient=tk.VERTICAL, command=self.site_tree.yview)
+        self.site_tree.configure(yscrollcommand=s_scroll.set)
+        s_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        ttk.Button(site_tab, text="💾 Site 목록 전체 엑셀 파일에 저장하기", command=self.submit_site_data).pack(fill=tk.X, padx=10, pady=5)
+
+        # -------------------------------------------------------------
+        # [탭 2: User Information (Active / Inactive 서브 패널로 분리)]
+        # -------------------------------------------------------------
+        user_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(user_tab, text="User Information 관리")
+        
+        user_sub_notebook = ttk.Notebook(user_tab)
+        user_sub_notebook.pack(fill=tk.X, padx=5, pady=5)
+        
+        sub_active_frame = ttk.Frame(user_sub_notebook)
+        user_sub_notebook.add(sub_active_frame, text=" 계정 생성 (Active) ")
+        self.build_user_input_form(sub_active_frame, self.user_active_inputs, "Active")
+        
+        sub_inactive_frame = ttk.Frame(user_sub_notebook)
+        user_sub_notebook.add(sub_inactive_frame, text=" 계정 만료 (Inactive) ")
+        self.build_user_input_form(sub_inactive_frame, self.user_inactive_inputs, "Inactive")
+        
+        u_grid_frame = ttk.LabelFrame(user_tab, text="User 통합 업로드 대기 목록 (Active/Inactive 혼합 관리)")
+        u_grid_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+        
+        self.user_tree = ttk.Treeview(u_grid_frame, columns=self.user_headers, show="headings", height=10)
+        for h in self.user_headers:
+            display_h = get_display_header(h)
+            self.user_tree.heading(h, text=display_h)
+            self.user_tree.column(h, width=110, anchor=tk.CENTER)
+            
+        self.user_tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
+        u_scroll = ttk.Scrollbar(u_grid_frame, orient=tk.VERTICAL, command=self.user_tree.yview)
+        self.user_tree.configure(yscrollcommand=u_scroll.set)
+        u_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        ttk.Button(user_tab, text="💾 User 생성/만료 목록 전체 엑셀 파일에 저장하기", command=self.submit_user_data).pack(fill=tk.X, padx=10, pady=5)
+
+        # -------------------------------------------------------------
+        # [탭 3: 기존 데이터 통합 검색]
+        # -------------------------------------------------------------
+        search_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(search_tab, text="기존 데이터 검색")
+        
+        search_frame = ttk.LabelFrame(search_tab, text="검색 조건")
+        search_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(search_frame, text="User ID로 검색:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.ent_search_key = ttk.Entry(search_frame, width=20)
+        self.ent_search_key.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        ttk.Button(search_frame, text="🔍 전 시트 통합 검색", command=self.search_integrated_data).pack(side=tk.LEFT, padx=5, pady=5)
+        
+        self.txt_search_result = tk.Text(search_tab, height=22, bg="#fbfbfb")
+        self.txt_search_result.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+
+    def build_user_input_form(self, parent_frame, input_dict, type_mode):
+        f_box = ttk.LabelFrame(parent_frame, text=f"데이터 필드 기입 ({type_mode} 모드 전용 매핑)")
+        f_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        sorted_codes = sorted(list(self.site_code_name_map.keys()))
+        sorted_names = [self.site_code_name_map[c] for c in sorted_codes]
+        
+        r, c = 0, 0
+        cb_code = None
+        cb_name = None
+        
+        for header in self.user_headers:
+            h_clean = clean_string(header)
+            display_h = get_display_header(header)
+            lbl_text = display_h + ":"
+            
+            if "request" in h_clean and "date" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                lbl_auto = ttk.Label(f_box, text="[자동 오늘 날짜]", font=("Arial", 9, "bold"), foreground="blue")
+                lbl_auto.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                input_dict[header] = ("AUTO_DATE", lbl_auto)
+                
+            elif "type" == h_clean or (len(h_clean) > 2 and "type" in h_clean and not "server" in h_clean):
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                lbl_t = ttk.Label(f_box, text=type_mode, font=("Arial", 10, "bold"), foreground="darkgreen" if type_mode=="Active" else "red")
+                lbl_t.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                input_dict[header] = ("AUTO_TYPE", type_mode)
+                
+            elif "server" in h_clean and "type" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                cb = ttk.Combobox(f_box, values=["beta", "prod"], width=13, state="readonly")
+                cb.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                cb.current(0)
+                input_dict[header] = ("COMBO", cb)
+                
+            elif "date" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                d_frame = ttk.Frame(f_box)
+                d_frame.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                ent = ttk.Entry(d_frame, width=12)
+                ent.pack(side=tk.LEFT)
+                ttk.Button(d_frame, text="📅", width=3, command=lambda e=ent: CalendarPopup(self.root, e)).pack(side=tk.LEFT, padx=2)
+                input_dict[header] = ("CALENDAR", ent)
+                
+            elif "code" in h_clean and "site" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                cb_code = ttk.Combobox(f_box, values=sorted_codes, width=15, state="readonly")
+                cb_code.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                input_dict[header] = ("SITE_CODE_CB", cb_code)
+                
+            elif "name" in h_clean and "site" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                cb_name = ttk.Combobox(f_box, values=sorted_names, width=15, state="readonly")
+                cb_name.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                input_dict[header] = ("SITE_NAME_CB", cb_name)
+                
+            elif "role" in h_clean:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                r_frame = ttk.Frame(f_box)
+                r_frame.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                
+                lbl_roles_display = ttk.Label(r_frame, text="(선택 없음)", width=15, font=("Arial", 9, "italic"))
+                lbl_roles_display.pack(side=tk.LEFT)
+                
+                selected_roles_list = []
+                btn_role = ttk.Button(r_frame, text="선택", width=4, 
+                                      command=lambda l=lbl_roles_display, s=selected_roles_list: self.open_role_selector(l, s))
+                btn_role.pack(side=tk.LEFT, padx=2)
+                input_dict[header] = ("ROLE_SELECTOR", selected_roles_list)
+                
+            else:
+                ttk.Label(f_box, text=lbl_text).grid(row=r, column=c*2, padx=5, pady=5, sticky=tk.W)
+                ent = ttk.Entry(f_box, width=15)
+                ent.grid(row=r, column=c*2+1, padx=5, pady=5, sticky=tk.W)
+                input_dict[header] = ("TEXT", ent)
+                
+            c += 1
+            if c > 2:
+                c = 0; r += 1
+                
+        if cb_code and cb_name:
+            cb_code.bind("<<ComboboxSelected>>", lambda event, cc=cb_code, cn=cb_name: self.on_site_code_changed(cc, cn))
+            cb_name.bind("<<ComboboxSelected>>", lambda event, cc=cb_code, cn=cb_name: self.on_site_name_changed(cc, cn))
+            
+        btn_action_frame = ttk.Frame(f_box)
+        btn_action_frame.grid(row=r+1, column=0, columnspan=6, padx=5, pady=10, sticky=tk.E)
+        ttk.Button(btn_action_frame, text=f"➕ {type_mode} 대기목록에 추가", command=lambda m=type_mode: self.add_user_to_grid(m)).pack(side=tk.LEFT, padx=5)
+
+    def on_site_code_changed(self, cb_code, cb_name):
+        code = cb_code.get()
+        if code in self.site_code_name_map:
+            cb_name.set(self.site_code_name_map[code])
+
+    def on_site_name_changed(self, cb_code, cb_name):
+        name = cb_name.get()
+        if name in self.site_name_code_map:
+            cb_code.set(self.site_name_code_map[name])
+
+    def open_role_selector(self, display_label, target_list):
+        pop = tk.Toplevel(self.root)
+        pop.title("ROLE 다중 선택")
+        pop.geometry("250x300")
+        pop.grab_set()
+        
+        ttk.Label(pop, text="해당되는 역할을 모두 체크하세요:", font=("Arial", 9, "bold")).pack(pady=10)
+        
+        chk_frame = ttk.Frame(pop)
+        chk_frame.pack(expand=True, fill=tk.BOTH, padx=15)
+        
+        chk_vars = {}
+        for role in self.parsed_roles:
+            var = tk.BooleanVar(value=True if role in target_list else False)
+            chk_vars[role] = var
+            cb = ttk.Checkbutton(chk_frame, text=role, variable=var)
+            cb.pack(anchor=tk.W, pady=3)
+            
+        def confirm_selection():
+            target_list.clear()
+            for role, var in chk_vars.items():
+                if var.get():
+                    target_list.append(role)
+            if target_list:
+                display_label.config(text=", ".join(target_list))
+            else:
+                display_label.config(text="(선택 없음)")
+            pop.destroy()
+            
+        ttk.Button(pop, text="적용 및 확인", command=confirm_selection).pack(pady=10)
+
+    def add_site_to_grid(self):
+        row_values = []
+        uid_present = False
+        uid_val = ""
+        
+        for h in self.site_headers:
+            if h not in self.site_inputs:
+                row_values.append("")
+                continue
+            mode, widget = self.site_inputs[h]
+            if mode == "AUTO_DATE":
+                row_values.append(datetime.now().strftime("%Y-%m-%d"))
+            elif mode == "COMBO":
+                row_values.append(widget.get())
+            elif mode in ["CALENDAR", "TEXT"]:
+                val = widget.get().strip()
+                row_values.append(val)
+                if "userid" in clean_string(h):
+                    uid_present = True
+                    uid_val = val
+            else:
+                row_values.append("")
+                
+        if uid_present and not uid_val:
+            messagebox.showwarning("필수 입력 누락", "User ID 항목은 반드시 기입해야 합니다.")
+            return
+            
+        self.site_tree.insert("", tk.END, values=row_values)
+        
+        for h in self.site_headers:
+            if h in self.site_inputs:
+                mode, widget = self.site_inputs[h]
+                if mode in ["CALENDAR", "TEXT"]:
+                    widget.delete(0, tk.END)
+
+    def add_user_to_grid(self, type_mode):
+        inputs = self.user_active_inputs if type_mode == "Active" else self.user_inactive_inputs
+        row_values = []
+        uid_val = ""
+        
+        for h in self.user_headers:
+            if h not in inputs:
+                row_values.append("")
+                continue
+            info = inputs[h]
+            mode = info[0]
+            
+            if mode == "AUTO_DATE":
+                row_values.append(datetime.now().strftime("%Y-%m-%d"))
+            elif mode == "AUTO_TYPE":
+                row_values.append(type_mode)
+            elif mode == "COMBO":
+                row_values.append(info[1].get())
+            elif mode in ["SITE_CODE_CB", "SITE_NAME_CB"]:
+                row_values.append(info[1].get())
+            elif mode == "CALENDAR":
+                row_values.append(info[1].get().strip())
+            elif mode == "ROLE_SELECTOR":
+                row_values.append(", ".join(info[1]))
+            elif mode == "TEXT":
+                val = info[1].get().strip()
+                row_values.append(val)
+                if "userid" in clean_string(h):
+                    uid_val = val
+                    
+        if not uid_val:
+            messagebox.showwarning("필수 입력 누락", "User ID 항목은 필수 기입 대상입니다.")
+            return
+            
+        self.user_tree.insert("", tk.END, values=row_values)
+        
+        for h in self.user_headers:
+            if h in inputs:
+                info = inputs[h]
+                mode = info[0]
+                if mode == "TEXT" or mode == "CALENDAR":
+                    info[1].delete(0, tk.END)
+                elif mode in ["SITE_CODE_CB", "SITE_NAME_CB"]:
+                    info[1].set("")
+                elif mode == "ROLE_SELECTOR":
+                    info[1].clear()
+
+    def delete_selected_grid(self, tree_widget):
+        for item in tree_widget.selection():
+            tree_widget.delete(item)
+
+    def submit_site_data(self):
+        self.save_tree_to_excel("Site Information", self.site_tree, self.site_headers)
+
+    def submit_user_data(self):
+        self.save_tree_to_excel("User Information", self.user_tree, self.user_headers)
+
+    def save_tree_to_excel(self, sheet_name, tree_widget, current_headers):
+        self.update_latest_file()
+        if not self.latest_src_file:
+            messagebox.showerror("오류", "연동 가능한 대상 엑셀 파일이 부재합니다.")
+            return
+            
+        items = tree_widget.get_children()
+        if not items:
+            messagebox.showwarning("알림", "대기 목록에 업로드할 데이터가 없습니다.")
+            return
+            
+        try:
+            wb = openpyxl.load_workbook(self.latest_src_file)
+            ws = find_sheet_by_lenient_name(wb, sheet_name)
+            
+            if ws is None:
+                ws = wb.create_sheet(title=sheet_name)
+                ws.append(current_headers)
+                
+            for item in items:
+                ws.append([str(x) for x in tree_widget.item(item)["values"]])
+                
+            wb.save(self.latest_src_file)
+            wb.close()
+            
+            messagebox.showinfo("저장 완료", f"'{sheet_name}'에 {len(items)}건의 데이터가 누적 저장되었습니다.")
+            for item in items: tree_widget.delete(item)
+            
+            self.load_excel_metadata()
+            self.rebuild_main_ui()
+        except Exception as e:
+            messagebox.showerror("엑셀 저장 오류", f"엑셀 파일 쓰기에 실패했습니다:\n{str(e)}")
+
+    def search_integrated_data(self):
+        self.update_latest_file()
+        search_key = self.ent_search_key.get().strip()
+        if not search_key:
+            messagebox.showwarning("검색 주의", "조회하려는 User ID를 입력하세요.")
+            return
+        if not self.latest_src_file:
+            messagebox.showerror("오류", "연동 파일이 존재하지 않습니다.")
+            return
+            
+        try:
+            wb = openpyxl.load_workbook(self.latest_src_file, data_only=True)
+            self.txt_search_result.delete("1.0", tk.END)
+            found_flag = False
+            
+            for s_name in ["Site Information", "User Information"]:
+                ws = find_sheet_by_lenient_name(wb, s_name)
+                if ws is None: continue
+                
+                headers_raw = [str(cell.value).strip() for cell in ws[1] if cell.value]
+                
+                id_idx = -1
+                for idx, h in enumerate(headers_raw):
+                    if "userid" in clean_string(h):
+                        id_idx = idx
+                        break
+                if id_idx == -1: id_idx = 0
+                
+                # f-string 밖에서 안전하게 변수 생성
+                section_txt = f"★ [{s_name} - 매칭 내역] ★\n"
+                sheet_found = False
+                
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if id_idx < len(row) and row[id_idx] and clean_string(row[id_idx]) == clean_string(search_key):
+                        for h_name, val in zip(headers_raw, row):
+                            # 백슬래시 문법 에러를 회피하기 위해 변수 가공을 f-string 외부로 분리
+                            clean_h_name = get_display_header(h_name)
+                            display_val = val if val is not None else ''
+                            section_txt += f" ▫️ {clean_h_name}: {display_val}\n"
+                        section_txt += "--------------------------------------\n"
+                        sheet_found = True
+                        found_flag = True
+                        
+                if sheet_found:
+                    self.txt_search_result.insert(tk.END, section_txt + "\n")
+                    
+            if not found_flag:
+                self.txt_search_result.insert(tk.END, f"❌ 통합 검색 결과 '{search_key}' 유저 ID에 해당되는 정보가 없습니다.")
+            wb.close()
+        except Exception as e:
+            messagebox.showerror("검색 시스템 오류", f"조회 중 에러가 발생했습니다:\n{str(e)}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = IntegratedManagementApp(root)
+    root.mainloop()
